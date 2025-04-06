@@ -6,74 +6,89 @@ from skimage.color import rgb2lab
 from tqdm import tqdm
 import shutil
 
-# CONFIGURATION
+# CONFIG
 BATCH_SIZE = 5000
-batch_counter = 1
+RESIZE_TO = (512, 512)
+log_file_path = "/content/drive/MyDrive/ColorizationBatches/processed_log.txt"
 
-# Paths
-zip_path = "/content/images.zip"  # Original ZIP you copied from Drive
-working_zip_path = "/content/batch_work/images_working.zip"
+# Determine batch number dynamically from log
+if os.path.exists(log_file_path):
+    with open(log_file_path, 'r') as f:
+        total_processed = len(f.readlines())
+else:
+    total_processed = 0
+
+BATCH_NUMBER = total_processed // BATCH_SIZE + 1
+
+# PATHS
+working_zip = "/content/images.zip"
 temp_dir = "/content/batch_work/temp_batch"
-output_drive_path = "/content/drive/MyDrive/ColorizationBatches"
-
-# Setup safe workspace
+output_drive = "/content/drive/MyDrive/ColorizationBatches"
 os.makedirs("/content/batch_work", exist_ok=True)
-os.makedirs(output_drive_path, exist_ok=True)
+os.makedirs(output_drive, exist_ok=True)
 
-# Make a copy of the zip to work on
-if not os.path.exists(working_zip_path):
-    shutil.copy(zip_path, working_zip_path)
+# LOAD PROCESSED LOG
+processed = set()
+if os.path.exists(log_file_path):
+    with open(log_file_path, 'r') as f:
+        processed = set(x.strip() for x in f.readlines())
 
-while True:
-    print(f"\n🔁 Starting Batch {batch_counter}")
-    color_dir = os.path.join(temp_dir, "color")
-    bw_dir = os.path.join(temp_dir, "bw")
-    os.makedirs(color_dir, exist_ok=True)
-    os.makedirs(bw_dir, exist_ok=True)
+# READ FROM ZIP
+with zipfile.ZipFile(working_zip, 'r') as zip_file:
+    all_images = [f for f in zip_file.namelist() if f.endswith(('.jpg', '.png'))]
+    remaining = [f for f in all_images if os.path.basename(f) not in processed]
+    current_batch = remaining[:BATCH_SIZE]
 
-    # Open working zip
-    with zipfile.ZipFile(working_zip_path, 'r') as archive:
-        all_images = [f for f in archive.namelist() if f.endswith(('.jpg', '.png'))]
-        if not all_images:
-            print("✅ All images processed and ZIP is empty!")
-            break
+    if not current_batch:
+        print("✅ No unprocessed images left.")
+    else:
+        # Create temp folders
+        color_dir = os.path.join(temp_dir, "color")
+        bw_dir = os.path.join(temp_dir, "bw")
+        os.makedirs(color_dir, exist_ok=True)
+        os.makedirs(bw_dir, exist_ok=True)
 
-        current_batch = all_images[:BATCH_SIZE]
-
-        for name in tqdm(current_batch, desc=f"Processing Batch {batch_counter}"):
+        processed_now = []
+        for name in tqdm(current_batch, desc=f"Batch {BATCH_NUMBER}"):
             try:
-                with archive.open(name) as file:
-                    img = Image.open(file).convert("RGB")
+                with zip_file.open(name) as file:
+                    img = Image.open(file).convert("RGB").resize(RESIZE_TO)
             except:
                 continue
 
             base_name = os.path.basename(name)
+            processed_now.append(base_name)
+
+            # Save resized color image
             img.save(os.path.join(color_dir, base_name))
 
+            # Convert to Lab and extract L channel for grayscale
             img_np = np.array(img) / 255.0
             lab = rgb2lab(img_np).astype("float32")
             L = lab[:, :, 0] / 100.0
             L_img = (L * 255).astype("uint8")
             bw_img = Image.fromarray(L_img)
+
+            # Save grayscale image
             bw_img.save(os.path.join(bw_dir, base_name))
 
-    # Zip the batch
-    zip_output_path = shutil.make_archive(f"/content/batch_work/colorization_batch_{batch_counter}", 'zip', temp_dir)
-    shutil.move(zip_output_path, os.path.join(output_drive_path, f"batch_{batch_counter}.zip"))
-    shutil.rmtree(temp_dir)
+# SAVE FOLDERS TO DRIVE
+shutil.move(color_dir, os.path.join(output_drive, f"batch_{BATCH_NUMBER}_color"))
+shutil.move(bw_dir, os.path.join(output_drive, f"batch_{BATCH_NUMBER}_bw"))
+shutil.rmtree(temp_dir)
 
-    # Remove processed images from the ZIP
-    remaining_files = [f for f in all_images if f not in current_batch]
-    with zipfile.ZipFile(working_zip_path, 'r') as zin:
-        with zipfile.ZipFile("/content/batch_work/temp_remaining.zip", 'w') as zout:
-            for item in zin.infolist():
-                if item.filename in remaining_files:
-                    zout.writestr(item, zin.read(item.filename))
+# REMOVE PROCESSED FILES FROM ZIP
+with zipfile.ZipFile(working_zip, 'r') as zin:
+    with zipfile.ZipFile("/content/images_remaining.zip", 'w') as zout:
+        for item in zin.infolist():
+            if os.path.basename(item.filename) not in processed_now:
+                zout.writestr(item, zin.read(item.filename))
+os.remove(working_zip)
+os.rename("/content/images_remaining.zip", working_zip)
 
-    os.remove(working_zip_path)
-    os.rename("/content/batch_work/temp_remaining.zip", working_zip_path)
+# UPDATE LOG
+with open(log_file_path, 'a') as log:
+    for name in processed_now:
+        log.write(name + '\n')
 
-    print(f"✅ Batch {batch_counter} complete and saved to Drive.")
-    batch_counter += 1
-
-print("🎉 All done! All images processed and removed from original ZIP.")
+print(f"✅ Batch {BATCH_NUMBER} complete. Resized to {RESIZE_TO}, saved to Drive, removed from ZIP, and logged.")
